@@ -21,6 +21,9 @@ def read_arduino(ser):
     while True:
         try:
             line = ser.readline().decode(errors="ignore").strip()
+
+            print_formatted_text(f"[COM][{ser.port}] Lettura: {line}")  # debug lettura
+
             if line:
                 if line == "READY":
                     print_formatted_text(f"[COM][{ser.port}] ✅ Pronta!")
@@ -83,7 +86,7 @@ def load_networks(filename="networks.txt"):
 
 
 
-def try_connect_wifi(ser, ssid, pwd, timeout=10):
+def try_connect_wifi(ser, ssid, pwd, timeout=15):
     ser.reset_input_buffer()
     # Invia i comandi separati come richiesto dal firmware Arduino
     ser.write(f"SETSSID {ssid}\n".encode())
@@ -105,50 +108,14 @@ def try_connect_wifi(ser, ssid, pwd, timeout=10):
     print_formatted_text(f"[PY][{ser.port}] ⏰ Timeout connessione a {ssid}")
     return False
 
-def connect_arduino(idx, ser, available_networks, assigned_ssids):
+def connect_arduino(ser, ssid, pwd, assigned_ssids):
     print_formatted_text(f"[PY][{ser.port}] Inizializzazione connessione WiFi...")
-    if idx >= len(available_networks):
-        print_formatted_text(f"[PY][{ser.port}] ❌ Nessuna rete disponibile per questa scheda.")
-        return
-
-    # Trova una rete non ancora assegnata
-    tried = set()
-    while True:
-        print_formatted_text(f"[PY][{ser.port}] Tentativo di connessione...")
-        # Scegli la prima rete non ancora assegnata
-        for net_idx, (ssid, pwd) in enumerate(available_networks):
-            if ssid not in assigned_ssids and net_idx not in tried:
-                break
-        else:
-            # Se tutte le reti sono già assegnate, scegli quella di default (idx)
-            ssid, pwd = available_networks[idx]
-            net_idx = idx
-        tried.add(net_idx)
-
-        ok = try_connect_wifi(ser, ssid, pwd)
-        if ok:
-            assigned_ssids.add(ssid)
-            # Aggiorna la posizione idx con la rete usata
-            available_networks[idx] = (ssid, pwd)
-            # save_networks(available_networks)  # RIMOSSO: non scrivere più su file
-            break
-        else:
-            print_formatted_text(f"[PY][{ser.port}] Inserisci nuove credenziali per questa scheda:")
-            new_ssid = prompt(f"[{ser.port}] Nuovo SSID: ").strip()
-            new_pwd = prompt(f"[{ser.port}] Nuova PASSWORD: ").strip()
-            # Aggiorna la lista reti e riprova
-            available_networks[idx] = (new_ssid, new_pwd)
-            # save_networks(available_networks)  # RIMOSSO: non scrivere più su file
-            ssid, pwd = new_ssid, new_pwd
-            net_idx = idx
-            # Se la nuova rete è già assegnata a un altro Arduino, si riprova
-            if ssid in assigned_ssids:
-                print_formatted_text(f"[PY][{ser.port}] ⚠️ Questa rete è già assegnata a un altro Arduino. Scegli una rete diversa.")
-                continue
-            ok = try_connect_wifi(ser, ssid, pwd)
-            if ok:
-                assigned_ssids.add(ssid)
-                break
+    print_formatted_text(f"[PY][{ser.port}] Tentativo di connessione a SSID: {ssid}")
+    ok = try_connect_wifi(ser, ssid, pwd)
+    if ok:
+        assigned_ssids.add(ssid)
+    else:
+        print_formatted_text(f"[PY][{ser.port}] ❌ Connessione fallita a {ssid}. Verifica il file networks.txt.")
 
  
 
@@ -169,10 +136,17 @@ if not arduinos:
 # -----------------------
 # CONNESSIONE WIFI PARALLELA
 # -----------------------
+
 available_networks = load_networks()
 assigned_ssids = set()
+threads = []
 for idx, ser in enumerate(arduinos):
-    connect_arduino(idx, ser, available_networks, assigned_ssids)
+    ssid, pwd = available_networks[idx]
+    t = threading.Thread(target=connect_arduino, args=(ser, ssid, pwd, assigned_ssids))
+    t.start()
+    threads.append(t)
+for t in threads:
+    t.join()
 
 
 

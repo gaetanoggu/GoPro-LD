@@ -1,6 +1,7 @@
 /*
 ========================================================
    Arduino Nano 33 IoT - WiFi + Controllo GoPro
+   VERSIONE: senza salvataggio credenziali in flash
 ========================================================
 
 UTILIZZO:
@@ -11,17 +12,16 @@ I comandi vanno inviati terminati da newline (\n).
 COMANDI DISPONIBILI SU PORTA SERIALE:
 
 - SETSSID <nome_rete>
-    Imposta l'SSID della rete WiFi a cui connettersi.
+    Imposta l'SSID della rete WiFi a cui connettersi per la sessione corrente.
     Esempio:  SETSSID MyWiFi
 
 - SETPASS <password>
-    Imposta la password della rete WiFi.
+    Imposta la password della rete WiFi per la sessione corrente.
     Esempio:  SETPASS MyPassword123
 
 - CONNECT
-    Tenta la connessione alla rete WiFi usando SSID e
-    password impostati. Se la connessione riesce, le
-    credenziali vengono salvate in flash.
+    Tenta la connessione alla rete WiFi usando SSID e password impostati.
+    ATTENZIONE: le credenziali NON vengono salvate.
 
 - STATUS
     Mostra lo stato della connessione WiFi:
@@ -29,7 +29,7 @@ COMANDI DISPONIBILI SU PORTA SERIALE:
       DISCONNECTED (non connesso)
 
 - START
-    Invia alla GoPro (IP 10.5.5.9) il comando per 
+    Invia alla GoPro (IP 10.5.5.9) il comando per
     avviare la registrazione.
 
 - STOP
@@ -38,12 +38,10 @@ COMANDI DISPONIBILI SU PORTA SERIALE:
 
 --------------------------------------------------------
 NOTE:
-- Le credenziali WiFi vengono salvate in flash dopo 
-  un CONNECT riuscito, e ricaricate automaticamente 
-  all'avvio.
-- Se la connessione cade, il sistema prova a 
-  riconnettersi automaticamente ogni 10 secondi.
-- La GoPro deve essere accesa e connessa alla stessa 
+- Prima di invocare CONNECT è obbligatorio aver inviato SETSSID e SETPASS.
+- Se la connessione cade, il sistema prova a
+  riconnettersi automaticamente ogni 10 secondi usando le credenziali correnti (non persistenti).
+- La GoPro deve essere accesa e connessa alla stessa
   rete WiFi dell'Arduino (o in WiFi diretto GoPro).
 
 ========================================================
@@ -51,18 +49,9 @@ NOTE:
 
 #include <SPI.h>
 #include <WiFiNINA.h>
-#include <FlashStorage.h>
 
-// Struttura per salvare SSID e password
-struct WiFiCredentials {
-  char ssid[32];
-  char pass[64];
-};
-
-// Storage Flash
-FlashStorage(wifiStorage, WiFiCredentials);
-
-WiFiCredentials creds;
+char creds_ssid[32] = "";
+char creds_pass[64] = "";
 
 int status = WL_IDLE_STATUS;
 WiFiClient client;
@@ -70,24 +59,19 @@ unsigned long lastConnectAttempt = 0;
 const unsigned long reconnectInterval = 10000; // 10 secondi
 
 // timeout in ms per la lettura della risposta HTTP
-const unsigned long HTTP_RESPONSE_TIMEOUT = 3000;
+const unsigned long HTTP_RESPONSE_TIMEOUT = 10000;
 
 void setup() {
   Serial.begin(115200);
   while (!Serial);
 
-  Serial.println("Avvio sistema WiFi...");
-
-  // Legge credenziali salvate
-  readCredentials();
   connectWiFi();
 }
 
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     unsigned long now = millis();
-    if (now - lastConnectAttempt > reconnectInterval) {
-      Serial.println("⚠️ WiFi caduto, riconnessione...");
+    if (now - lastConnectAttempt > reconnectInterval && !(creds_ssid[0] == '\0' || (uint8_t)creds_ssid[0] == 0xFF) && !(creds_pass[0] == '\0' || (uint8_t)creds_pass[0] == 0xFF)) {
       connectWiFi();
     }
   }
@@ -99,32 +83,43 @@ void loop() {
 
     if (cmd.startsWith("SETSSID ")) {
       cmd.remove(0, 8);
-      cmd.toCharArray(creds.ssid, sizeof(creds.ssid));
-      Serial.print("Nuovo SSID ricevuto: "); Serial.println(creds.ssid);
-    } 
+      cmd.toCharArray(creds_ssid, sizeof(creds_ssid));
+
+      memset(creds_pass, 0, sizeof(creds_pass));
+
+      Serial.println("NO_PASS");
+    }
     else if (cmd.startsWith("SETPASS ")) {
       cmd.remove(0, 8);
-      cmd.toCharArray(creds.pass, sizeof(creds.pass));
-      Serial.println("Nuova password ricevuta");
+      cmd.toCharArray(creds_pass, sizeof(creds_pass));
+
+      connectWiFi();
     }
     else if (cmd == "CONNECT") {
-      if (connectWiFi()) {
-        saveCredentials(); // Salva solo se connessione OK
-      }
+      connectWiFi();
     }
     else if (cmd == "START") startRecording();
     else if (cmd == "STOP") stopRecording();
     else if (cmd == "STATUS") {
       if (WiFi.status() == WL_CONNECTED) {
-        Serial.print("CONNECTED to: ");
-        Serial.println(WiFi.SSID());
-        Serial.print("IP: "); Serial.println(WiFi.localIP());
+        Serial.println("CONNECTED");
       } else {
         Serial.println("DISCONNECTED");
       }
     }
+    else if (cmd == "QUIT") {
+      if (client.connected()) {
+        client.stop();
+        Serial.println("CLOSED");
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+        WiFi.disconnect();
+        Serial.println("DISCONNECTED");
+      }
+    }
     else {
-      Serial.println("⚠️ Comando non riconosciuto");
+      Serial.println("⚠ Comando non riconosciuto");
     }
   }
 }
@@ -134,15 +129,18 @@ bool connectWiFi() {
   lastConnectAttempt = millis();
 
   // controllo credenziali
-  if (creds.ssid[0] == '\0' || (uint8_t)creds.ssid[0] == 0xFF) {
-    Serial.println("⚠️ Nessun SSID configurato");
+  if (creds_ssid[0] == '\0' || (uint8_t)creds_ssid[0] == 0xFF) {
+    Serial.println("NO_SSID");
+    return false;
+  }
+  if (creds_pass[0] == '\0' || (uint8_t)creds_pass[0] == 0xFF) {
+    Serial.println("NO_PASS");
     return false;
   }
 
-  Serial.print("Connessione a WiFi: "); Serial.println(creds.ssid);
+  Serial.println("CONNECTING");
 
-  // In alcuni casi WiFi.begin restituisce uno status ma preferisco controllare WiFi.status()
-  WiFi.begin(creds.ssid, creds.pass);
+  WiFi.begin(creds_ssid, creds_pass);
 
   unsigned long start = millis();
   const unsigned long timeout = 10000; // 10s massimo per connettersi
@@ -153,51 +151,26 @@ bool connectWiFi() {
 
   status = WiFi.status();
   if (status == WL_CONNECTED) {
-    Serial.println("\n✅ Connesso!");
-    printConnectionInfo();
+    Serial.println("CONNECTED");
     return true;
   } else {
-    Serial.println("\n❌ Connessione fallita");
-    // opzionale: mostra codice errore
-    Serial.print("WiFi status: "); Serial.println(status);
+    Serial.println("DISCONNECTED");
     return false;
   }
 }
 
-void printConnectionInfo() {
-  Serial.print("SSID: "); Serial.println(WiFi.SSID());
-  Serial.print("IP: "); Serial.println(WiFi.localIP());
-}
-
-// Flash storage
-void readCredentials() {
-  creds = wifiStorage.read();
-  if (creds.ssid[0] == '\0' || (uint8_t)creds.ssid[0] == 0xFF) {
-    creds.ssid[0] = '\0';
-    creds.pass[0] = '\0';
-  }
-  Serial.print("SSID letto da flash: "); 
-  Serial.println(creds.ssid[0] ? creds.ssid : "<vuoto>");
-}
-
-void saveCredentials() {
-  wifiStorage.write(creds);
-  Serial.println("✅ Credenziali salvate in Flash");
-}
-
-// Funzioni GoPro
+// --- Funzioni GoPro ---
 void startRecording() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("⚠️ WiFi non connesso, impossibile START");
+    Serial.println("DISCONNECT");
     return;
   }
   if (!client.connect("10.5.5.9", 80)) {
-    Serial.println("❌ Impossibile connettersi alla GoPro (start)");
+    Serial.println("FAILED");
     client.stop();
     return;
   }
 
-  Serial.println("📡 Invio comando START...");
   client.println("GET /gp/gpControl/command/shutter?p=1 HTTP/1.1");
   client.println("Host: 10.5.5.9");
   client.println("Connection: close");
@@ -208,11 +181,9 @@ void startRecording() {
   while (client.connected() || client.available()) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
-      // opzionale: mostra la risposta
-      // Serial.println(line);
     }
     if (millis() - start > HTTP_RESPONSE_TIMEOUT) {
-      Serial.println("⚠️ Timeout nella lettura della risposta START");
+      Serial.println("TIMEOUT");
       break;
     }
   }
@@ -222,16 +193,15 @@ void startRecording() {
 
 void stopRecording() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("⚠️ WiFi non connesso, impossibile STOP");
+    Serial.println("DISCONNECT");
     return;
   }
   if (!client.connect("10.5.5.9", 80)) {
-    Serial.println("❌ Impossibile connettersi alla GoPro (stop)");
+    Serial.println("FAILED");
     client.stop();
     return;
   }
 
-  Serial.println("📡 Invio comando STOP...");
   client.println("GET /gp/gpControl/command/shutter?p=0 HTTP/1.1");
   client.println("Host: 10.5.5.9");
   client.println("Connection: close");
@@ -241,11 +211,9 @@ void stopRecording() {
   while (client.connected() || client.available()) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
-      // opzionale: mostra la risposta
-      // Serial.println(line);
     }
     if (millis() - start > HTTP_RESPONSE_TIMEOUT) {
-      Serial.println("⚠️ Timeout nella lettura della risposta STOP");
+      Serial.println("TIMEOUT");
       break;
     }
   }
