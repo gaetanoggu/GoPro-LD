@@ -22,8 +22,6 @@ def read_arduino(ser):
         try:
             line = ser.readline().decode(errors="ignore").strip()
 
-            print_formatted_text(f"[COM][{ser.port}] Lettura: {line}")  # debug lettura
-
             if line:
                 if line == "READY":
                     print_formatted_text(f"[COM][{ser.port}] ✅ Pronta!")

@@ -149,6 +149,8 @@ bool connectWiFi() {
     Serial.print(".");
   }
 
+  Serial.println("");
+
   status = WiFi.status();
   if (status == WL_CONNECTED) {
     Serial.println("CONNECTED");
