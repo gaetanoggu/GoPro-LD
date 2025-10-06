@@ -118,6 +118,17 @@ void loop() {
         Serial.println("DISCONNECTED");
       }
     }
+    else if (cmd == "RESET") {
+      if (WiFi.status() == WL_CONNECTED) {
+        WiFi.disconnect();
+        Serial.println("DISCONNECTED");
+      }
+
+      memset(creds_ssid, 0, sizeof(creds_ssid));
+      memset(creds_pass, 0, sizeof(creds_pass));
+
+      Serial.println("CLEARED");
+    }
     else {
       Serial.println("⚠ Comando non riconosciuto");
     }
