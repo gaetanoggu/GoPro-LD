@@ -23,7 +23,6 @@ STOP_CMD = b'\x01\x00\x06'
 
 desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
 
-
 class MovellaDevice:
     def __init__(self, name, address):
         self.name = name
@@ -33,95 +32,83 @@ class MovellaDevice:
         self.output_file = os.path.join(desktop_path, f"{name}_{safe_address}_data_{timestamp}.csv")
         self.client = BleakClient(address)
         self.data_char = None
-        self.recording = False  # <--- nuova variabile
+        self.recording = False
         self.data_received = False
 
-        # Scriviamo l'intestazione delle colonne se il file non esiste
         if not os.path.exists(self.output_file):
             with open(self.output_file, "w") as f:
                 f.write("timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
 
     def notification_handler(self, sender, data):
-        self.data_received = True
-        if not self.recording:  # <--- ignora dati se non registriamo
+        if not self.recording:
             return
         try:
             float_values = struct.unpack('<' + 'f'*(len(data)//4), data)
             with open(self.output_file, "a") as f:
                 f.write(f"{datetime.now().isoformat()},{','.join(map(str, float_values))}\n")
-            print(f"📡 {self.name} [{sender}] -> {float_values}")
         except struct.error:
-            print(f"⚠️ Errore nel decodificare i dati da {self.name}")
+            pass  # ignora pacchetti malformati
 
-
-async def activate_configuration(device: MovellaDevice):
+async def activate_configuration(device: MovellaDevice, rate_hz=120):
+    cfg_byte = b'\x01' if rate_hz == 60 else b'\x02'
     for char_uuid in CONFIG_CHARS:
         try:
-            await device.client.write_gatt_char(char_uuid, b'\x01', response=True)
-            print(f"⚙️ Configurazione inviata su {device.name} ({char_uuid})")
+            await device.client.write_gatt_char(char_uuid, cfg_byte, response=True)
+            print(f"⚙️ Configurazione {rate_hz}Hz inviata su {device.name} ({char_uuid})")
             return True
         except Exception:
             continue
-    print(f"⚠️ Nessuna caratteristica di configurazione ha funzionato per {device.name}")
+    print(f"⚠️ Nessuna caratteristica di configurazione funzionante per {device.name}")
     return False
-
 
 async def find_data_characteristic(device: MovellaDevice):
     for char_uuid in DATA_CHARS:
         try:
-            # In questa fase testiamo la ricezione senza registrazione
-            await device.client.start_notify(char_uuid, lambda s, d: setattr(device, 'data_received', True))
+            device.data_received = False
+            await device.client.start_notify(char_uuid, device.notification_handler)
             await device.client.write_gatt_char(CONTROL_CHAR_UUID, START_CMD, response=True)
-            await asyncio.sleep(3)
-            if device.data_received:
-                await device.client.write_gatt_char(CONTROL_CHAR_UUID, STOP_CMD, response=True)
-                await device.client.stop_notify(char_uuid)
-                device.data_char = char_uuid
-                print(f"✅ Dati ricevuti da {device.name} ({char_uuid})")
-                return char_uuid
+            await asyncio.sleep(1)  # breve attesa per ricevere qualche pacchetto
+            await device.client.write_gatt_char(CONTROL_CHAR_UUID, STOP_CMD, response=True)
             await device.client.stop_notify(char_uuid)
+            if device.data_received:
+                device.data_char = char_uuid
+                return char_uuid
         except Exception:
             continue
-    print(f"❌ Nessuna caratteristica dati funzionante su {device.name}")
     return None
-
 
 async def start_device(device: MovellaDevice):
     if device.data_char is None:
         print(f"⚠️ Nessuna caratteristica dati per {device.name}")
         return
-    device.recording = True  # <--- iniziamo registrazione
+    device.recording = True
     await device.client.start_notify(device.data_char, device.notification_handler)
     await device.client.write_gatt_char(CONTROL_CHAR_UUID, START_CMD, response=True)
-    print(f"🏁 Acquisizione avviata su {device.name}")
-
+    print(f"🏁 Recording avviato su {device.name}")
 
 async def stop_device(device: MovellaDevice):
     if device.data_char is None:
         return
     await device.client.write_gatt_char(CONTROL_CHAR_UUID, STOP_CMD, response=True)
     await device.client.stop_notify(device.data_char)
-    device.recording = False  # <--- fermiamo registrazione
-    print(f"🛑 Acquisizione fermata su {device.name}")
-
+    device.recording = False
+    print(f"🛑 Recording fermato su {device.name}")
 
 async def manage_input(devices):
     loop = asyncio.get_event_loop()
-
     while True:
-        cmd = await loop.run_in_executor(None, input, ">>> Digita 'a' per avviare raccolta dati su tutti i dispositivi: ")
+        cmd = await loop.run_in_executor(None, input, ">>> Digita 'a' per avviare recording: ")
         if cmd.strip().lower() == "a":
             await asyncio.gather(*(start_device(d) for d in devices))
             break
         print("⚠️ Digita 'a' per iniziare")
 
     while True:
-        cmd = await loop.run_in_executor(None, input, ">>> Digita 's' per fermare raccolta dati su tutti i dispositivi: ")
+        cmd = await loop.run_in_executor(None, input, ">>> Digita 's' per fermare recording: ")
         if cmd.strip().lower() == "s":
             await asyncio.gather(*(stop_device(d) for d in devices))
             break
         print("⚠️ Digita 's' per fermare")
-
 
 async def main():
     print("🔍 Scansione dispositivi Movella DOT...")
@@ -138,9 +125,7 @@ async def main():
     for device in devices:
         await device.client.connect()
         print(f"🔗 Connessione stabilita con {device.name}")
-        services = list(device.client.services)
-        print(f"📝 {device.name} ha {len(services)} servizi disponibili")
-        await activate_configuration(device)
+        await activate_configuration(device, rate_hz=120)  # puoi mettere 60 se vuoi
         await find_data_characteristic(device)
         print(f"💾 Dati di {device.name} salvati in '{device.output_file}'")
 
@@ -150,8 +135,7 @@ async def main():
         await device.client.disconnect()
         print(f"🔌 Dispositivo {device.name} disconnesso")
 
-    print("✅ Raccolta dati terminata per tutti i dispositivi.")
-
+    print("✅ Recording terminato per tutti i dispositivi.")
 
 if __name__ == "__main__":
     asyncio.run(main())
