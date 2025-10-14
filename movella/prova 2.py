@@ -2,9 +2,10 @@ import asyncio
 from bleak import BleakClient, BleakScanner
 from datetime import datetime
 import os
+import struct
 
 # ===== UUID principali =====
-CONTROL_CHAR_UUID = "15172001-4947-11e9-8646-d663bd873d93"  # scrittura comandi
+CONTROL_CHAR_UUID = "15172001-4947-11e9-8646-d663bd873d93"
 DATA_CHARS = [
     "15172002-4947-11e9-8646-d663bd873d93",
     "15172003-4947-11e9-8646-d663bd873d93",
@@ -17,11 +18,9 @@ CONFIG_CHARS = [
     "15177001-4947-11e9-8646-d663bd873d93",
 ]
 
-# Comandi
 START_CMD = b'\x01\x01\x06'
 STOP_CMD = b'\x01\x00\x06'
 
-# Percorso Desktop
 desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
 
 
@@ -30,25 +29,35 @@ class MovellaDevice:
         self.name = name
         self.address = address
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_file = os.path.join(desktop_path, f"{name}_data_{timestamp}.txt")
+        safe_address = address.replace(":", "")
+        self.output_file = os.path.join(desktop_path, f"{name}_{safe_address}_data_{timestamp}.csv")
         self.client = BleakClient(address)
         self.data_char = None
+        self.recording = False  # <--- nuova variabile
         self.data_received = False
 
+        # Scriviamo l'intestazione delle colonne se il file non esiste
+        if not os.path.exists(self.output_file):
+            with open(self.output_file, "w") as f:
+                f.write("timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
+
     def notification_handler(self, sender, data):
-        """Callback per pacchetti BLE"""
         self.data_received = True
-        hex_data = data.hex(" ")
-        with open(self.output_file, "a") as f:
-            f.write(f"{datetime.now().isoformat()} | {hex_data}\n")
-        print(f"📡 {self.name} [{sender}] -> {hex_data}")
+        if not self.recording:  # <--- ignora dati se non registriamo
+            return
+        try:
+            float_values = struct.unpack('<' + 'f'*(len(data)//4), data)
+            with open(self.output_file, "a") as f:
+                f.write(f"{datetime.now().isoformat()},{','.join(map(str, float_values))}\n")
+            print(f"📡 {self.name} [{sender}] -> {float_values}")
+        except struct.error:
+            print(f"⚠️ Errore nel decodificare i dati da {self.name}")
 
 
 async def activate_configuration(device: MovellaDevice):
-    client = device.client
     for char_uuid in CONFIG_CHARS:
         try:
-            await client.write_gatt_char(char_uuid, b'\x01', response=True)
+            await device.client.write_gatt_char(char_uuid, b'\x01', response=True)
             print(f"⚙️ Configurazione inviata su {device.name} ({char_uuid})")
             return True
         except Exception:
@@ -58,20 +67,19 @@ async def activate_configuration(device: MovellaDevice):
 
 
 async def find_data_characteristic(device: MovellaDevice):
-    client = device.client
     for char_uuid in DATA_CHARS:
         try:
-            await client.start_notify(char_uuid, device.notification_handler)
-            device.data_received = False
-            await client.write_gatt_char(CONTROL_CHAR_UUID, START_CMD, response=True)
-            await asyncio.sleep(3)  # attesa per ricevere pacchetti
+            # In questa fase testiamo la ricezione senza registrazione
+            await device.client.start_notify(char_uuid, lambda s, d: setattr(device, 'data_received', True))
+            await device.client.write_gatt_char(CONTROL_CHAR_UUID, START_CMD, response=True)
+            await asyncio.sleep(3)
             if device.data_received:
-                print(f"✅ Dati ricevuti da {device.name} ({char_uuid})")
-                await client.write_gatt_char(CONTROL_CHAR_UUID, STOP_CMD, response=True)
-                await client.stop_notify(char_uuid)
+                await device.client.write_gatt_char(CONTROL_CHAR_UUID, STOP_CMD, response=True)
+                await device.client.stop_notify(char_uuid)
                 device.data_char = char_uuid
+                print(f"✅ Dati ricevuti da {device.name} ({char_uuid})")
                 return char_uuid
-            await client.stop_notify(char_uuid)
+            await device.client.stop_notify(char_uuid)
         except Exception:
             continue
     print(f"❌ Nessuna caratteristica dati funzionante su {device.name}")
@@ -79,44 +87,40 @@ async def find_data_characteristic(device: MovellaDevice):
 
 
 async def start_device(device: MovellaDevice):
-    """Avvia raccolta dati su un singolo dispositivo"""
     if device.data_char is None:
-        print(f"⚠️ Nessuna caratteristica dati per {device.name}, impossibile avviare.")
+        print(f"⚠️ Nessuna caratteristica dati per {device.name}")
         return
+    device.recording = True  # <--- iniziamo registrazione
     await device.client.start_notify(device.data_char, device.notification_handler)
     await device.client.write_gatt_char(CONTROL_CHAR_UUID, START_CMD, response=True)
     print(f"🏁 Acquisizione avviata su {device.name}")
 
 
 async def stop_device(device: MovellaDevice):
-    """Ferma raccolta dati su un singolo dispositivo"""
     if device.data_char is None:
         return
     await device.client.write_gatt_char(CONTROL_CHAR_UUID, STOP_CMD, response=True)
     await device.client.stop_notify(device.data_char)
+    device.recording = False  # <--- fermiamo registrazione
     print(f"🛑 Acquisizione fermata su {device.name}")
 
 
 async def manage_input(devices):
     loop = asyncio.get_event_loop()
 
-    # Start raccolta dati
     while True:
         cmd = await loop.run_in_executor(None, input, ">>> Digita 'a' per avviare raccolta dati su tutti i dispositivi: ")
         if cmd.strip().lower() == "a":
-            await asyncio.gather(*(start_device(dev) for dev in devices))
+            await asyncio.gather(*(start_device(d) for d in devices))
             break
-        else:
-            print("⚠️ Digita 'a' per iniziare l'acquisizione")
+        print("⚠️ Digita 'a' per iniziare")
 
-    # Stop raccolta dati
     while True:
         cmd = await loop.run_in_executor(None, input, ">>> Digita 's' per fermare raccolta dati su tutti i dispositivi: ")
         if cmd.strip().lower() == "s":
-            await asyncio.gather(*(stop_device(dev) for dev in devices))
+            await asyncio.gather(*(stop_device(d) for d in devices))
             break
-        else:
-            print("⚠️ Digita 's' per fermare l'acquisizione")
+        print("⚠️ Digita 's' per fermare")
 
 
 async def main():
@@ -131,23 +135,17 @@ async def main():
     devices = [MovellaDevice(d.name, d.address) for d in dot_devices]
     print(f"✅ Trovati {len(devices)} dispositivi Movella DOT")
 
-    # Connessione e setup per ciascun dispositivo
     for device in devices:
         await device.client.connect()
         print(f"🔗 Connessione stabilita con {device.name}")
-
-        # Bleak >=0.20 effettua automaticamente la discovery dei servizi
         services = list(device.client.services)
         print(f"📝 {device.name} ha {len(services)} servizi disponibili")
-
         await activate_configuration(device)
         await find_data_characteristic(device)
         print(f"💾 Dati di {device.name} salvati in '{device.output_file}'")
 
-    # Gestione input start/stop
     await manage_input(devices)
 
-    # Disconnessione
     for device in devices:
         await device.client.disconnect()
         print(f"🔌 Dispositivo {device.name} disconnesso")
