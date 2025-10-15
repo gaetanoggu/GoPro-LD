@@ -224,7 +224,7 @@ class MovellaDOTSensor:
         payload_char = self._get_payload_characteristic(self.config.payload_mode)
         await self.client.stop_notify(payload_char)
 
-    async def start_recording(self, duration_seconds: int = 10):
+    async def start_recording(self, duration_seconds: int = 3600):
         """Start recording data on the sensor"""
         print(f"Starting recording for {duration_seconds} seconds...")
         current_time = int(time.time())
