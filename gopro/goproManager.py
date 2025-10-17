@@ -8,7 +8,7 @@ from prompt_toolkit.shortcuts import print_formatted_text
 # ============================================================
 # CONFIGURAZIONE
 # ============================================================
-PORTE = ["COM5", "COM15", "COM8"]  # Modifica con le tue porte reali
+PORTE = ["COM5"]  # Modifica con le tue porte reali
 BAUD = 115200
 STATUS_INTERVAL = 5  # secondi tra interrogazioni STATUS
 
